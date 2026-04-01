@@ -46,6 +46,10 @@ private final class ClipboardStore {
         let cutoff = Calendar.current.date(byAdding: .day, value: -maxDays, to: Date()) ?? Date.distantPast
         return entries.filter { $0.ts >= cutoff }.prefix(maxItems).map { $0 }
     }
+
+    func clearAll() {
+        try? FileManager.default.removeItem(at: fileURL)
+    }
 }
 
 private final class EnterTableView: NSTableView {
@@ -64,19 +68,44 @@ private final class EnterTableView: NSTableView {
     }
 }
 
-private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
-    private let labels: [String]
+private final class SearchField: NSSearchField {
+    var onEnter: (() -> Void)?
+    var onEscape: (() -> Void)?
+    var onDown: (() -> Void)?
+    var onUp: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: // Return / Numpad Enter
+            onEnter?()
+        case 53: // Escape
+            onEscape?()
+        case 125: // Down
+            onDown?()
+        case 126: // Up
+            onUp?()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+}
+
+private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSSearchFieldDelegate {
+    private let entries: [HistoryEntry]
+    private var filteredIndices: [Int]
     private var selectedIndex: Int?
     private var window: NSWindow?
     private var tableView: EnterTableView?
+    private var searchField: SearchField?
     private var modalStopped = false
 
-    init(labels: [String]) {
-        self.labels = labels
+    init(entries: [HistoryEntry]) {
+        self.entries = entries
+        self.filteredIndices = Array(entries.indices)
     }
 
     func present() -> Int? {
-        guard !labels.isEmpty else { return nil }
+        guard !entries.isEmpty else { return nil }
 
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
@@ -101,7 +130,31 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         content.autoresizingMask = [.width, .height]
         win.contentView = content
 
-        let scroll = NSScrollView(frame: content.bounds)
+        let topPadding: CGFloat = 12
+        let sidePadding: CGFloat = 12
+        let searchHeight: CGFloat = 32
+
+        let search = SearchField(frame: NSRect(
+            x: sidePadding,
+            y: content.bounds.height - topPadding - searchHeight,
+            width: content.bounds.width - (sidePadding * 2),
+            height: searchHeight
+        ))
+        search.autoresizingMask = [.width, .minYMargin]
+        search.placeholderString = "Search history"
+        search.delegate = self
+        search.onEnter = { [weak self] in self?.acceptSelection() }
+        search.onEscape = { [weak self] in self?.cancelSelection() }
+        search.onDown = { [weak self] in self?.moveSelection(delta: 1) }
+        search.onUp = { [weak self] in self?.moveSelection(delta: -1) }
+        content.addSubview(search)
+
+        let scroll = NSScrollView(frame: NSRect(
+            x: 0,
+            y: 0,
+            width: content.bounds.width,
+            height: content.bounds.height - searchHeight - (topPadding * 2)
+        ))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
 
@@ -131,15 +184,17 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
 
         self.window = win
         self.tableView = table
+        self.searchField = search
 
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
-        win.makeFirstResponder(table)
+        win.makeFirstResponder(search)
 
         NSApp.runModal(for: win)
 
         self.window = nil
         self.tableView = nil
+        self.searchField = nil
 
         return selectedIndex
     }
@@ -150,10 +205,59 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
             return
         }
         let row = tv.selectedRow
-        if row >= 0 && row < labels.count {
-            selectedIndex = row
+        if row >= 0 && row < filteredIndices.count {
+            selectedIndex = filteredIndices[row]
         }
         closeWindow()
+    }
+
+    private func moveSelection(delta: Int) {
+        guard let tv = tableView, !filteredIndices.isEmpty else { return }
+        let cur = tv.selectedRow >= 0 ? tv.selectedRow : 0
+        let next = max(0, min(filteredIndices.count - 1, cur + delta))
+        tv.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        tv.scrollRowToVisible(next)
+    }
+
+    private func displayText(for index: Int) -> String {
+        var s = entries[index].text.replacingOccurrences(of: "\n", with: "↵")
+        s = s.replacingOccurrences(of: "\t", with: "⇥")
+        if s.count > 120 {
+            s = String(s.prefix(120)) + "..."
+        }
+        return "\(index + 1). \(s)"
+    }
+
+    private func fuzzyMatch(_ query: String, in text: String) -> Bool {
+        if text.contains(query) {
+            return true
+        }
+
+        var q = query.startIndex
+        var t = text.startIndex
+        while q < query.endIndex && t < text.endIndex {
+            if query[q] == text[t] {
+                q = query.index(after: q)
+            }
+            t = text.index(after: t)
+        }
+        return q == query.endIndex
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        let query = (searchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if query.isEmpty {
+            filteredIndices = Array(entries.indices)
+        } else {
+            filteredIndices = entries.indices.filter { idx in
+                fuzzyMatch(query, in: entries[idx].text.lowercased())
+            }
+        }
+
+        tableView?.reloadData()
+        if !filteredIndices.isEmpty {
+            tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
     }
 
     private func cancelSelection() {
@@ -171,7 +275,7 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        labels.count
+        filteredIndices.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -194,15 +298,16 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
                 textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])
         }
-        textField.stringValue = labels[row]
+        let actualIndex = filteredIndices[row]
+        textField.stringValue = displayText(for: actualIndex)
         return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard let tv = tableView else { return }
         let row = tv.selectedRow
-        if row >= 0 && row < labels.count {
-            selectedIndex = row
+        if row >= 0 && row < filteredIndices.count {
+            selectedIndex = filteredIndices[row]
         }
     }
 
@@ -291,8 +396,16 @@ final class ClipHistoryApp {
         item.button?.font = NSFont.systemFont(ofSize: 14)
         
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Quit ClipHistory", action: #selector(quit), keyEquivalent: "q"))
-        menu.items.last?.target = self
+
+        let clearItem = NSMenuItem(title: "Clear All History", action: #selector(clearAllHistory), keyEquivalent: "")
+        clearItem.target = self
+        menu.addItem(clearItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(title: "Quit ClipHistory", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
         item.menu = menu
         
         self.statusItem = item
@@ -300,6 +413,11 @@ final class ClipHistoryApp {
     
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    @objc private func clearAllHistory() {
+        history.removeAll()
+        store.clearAll()
     }
 
     private func registerHotkey() {
@@ -347,23 +465,13 @@ final class ClipHistoryApp {
 
         let previousApp = NSWorkspace.shared.frontmostApplication
 
-        let labels = history.prefix(80).enumerated().map { idx, e in
-            var s = e.text.replacingOccurrences(of: "\n", with: "↵")
-            s = s.replacingOccurrences(of: "\t", with: "⇥")
-            if s.count > 120 {
-                s = String(s.prefix(120)) + "..."
-            }
-            s = s.replacingOccurrences(of: "\\", with: "\\\\")
-            s = s.replacingOccurrences(of: "\"", with: "\\\"")
-            return "\(idx + 1). \(s)"
-        }
-
-        let picker = ClipboardPicker(labels: labels)
-        guard let selectedIndex = picker.present(), selectedIndex < history.count else {
+        let visibleEntries = Array(history.prefix(80))
+        let picker = ClipboardPicker(entries: visibleEntries)
+        guard let selectedIndex = picker.present(), selectedIndex < visibleEntries.count else {
             return
         }
 
-        let text = history[selectedIndex].text
+        let text = visibleEntries[selectedIndex].text
         addToHistory(text)
 
         let pb = NSPasteboard.general
