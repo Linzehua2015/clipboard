@@ -120,6 +120,8 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
 
         table.onEnter = { [weak self] in self?.acceptSelection() }
         table.onEscape = { [weak self] in self?.cancelSelection() }
+        table.doubleAction = #selector(onDoubleClick)
+        table.target = self
 
         scroll.documentView = table
         content.addSubview(scroll)
@@ -204,11 +206,8 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         }
     }
 
-    func tableView(_ tableView: NSTableView, didDoubleClickRow row: Int) {
-        if row >= 0 && row < labels.count {
-            selectedIndex = row
-            closeWindow()
-        }
+    @objc private func onDoubleClick() {
+        acceptSelection()
     }
 
     func windowWillClose(_ notification: Notification) {
