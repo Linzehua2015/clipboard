@@ -1,0 +1,383 @@
+#!/usr/bin/env swift
+
+import AppKit
+import Carbon
+import Foundation
+import ApplicationServices
+
+private let maxDays = 7
+private let maxItems = 1000
+private let pollInterval: TimeInterval = 0.7
+
+private struct HistoryEntry: Codable {
+    let text: String
+    let ts: Date
+}
+
+private final class ClipboardStore {
+    private let fileURL: URL
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init() {
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/cliphistory", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        fileURL = base.appendingPathComponent("history.json")
+
+        encoder.outputFormatting = [.prettyPrinted]
+        decoder.dateDecodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .iso8601
+    }
+
+    func load() -> [HistoryEntry] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        guard let entries = try? decoder.decode([HistoryEntry].self, from: data) else { return [] }
+        return prune(entries)
+    }
+
+    func save(_ entries: [HistoryEntry]) {
+        let pruned = prune(entries)
+        guard let data = try? encoder.encode(pruned) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+
+    func prune(_ entries: [HistoryEntry]) -> [HistoryEntry] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -maxDays, to: Date()) ?? Date.distantPast
+        return entries.filter { $0.ts >= cutoff }.prefix(maxItems).map { $0 }
+    }
+}
+
+private final class EnterTableView: NSTableView {
+    var onEnter: (() -> Void)?
+    var onEscape: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: // Return / Numpad Enter
+            onEnter?()
+        case 53: // Escape
+            onEscape?()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+}
+
+private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    private let labels: [String]
+    private var selectedIndex: Int?
+    private var window: NSWindow?
+    private var tableView: EnterTableView?
+
+    init(labels: [String]) {
+        self.labels = labels
+    }
+
+    func present() -> Int? {
+        guard !labels.isEmpty else { return nil }
+
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let w = floor(visible.width * 0.5)
+        let h = floor(visible.height * 0.5)
+        let x = visible.minX + (visible.width - w) / 2
+        let y = visible.minY + (visible.height - h) / 2
+
+        let win = NSWindow(
+            contentRect: NSRect(x: x, y: y, width: w, height: h),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "ClipHistory"
+        win.isReleasedWhenClosed = false
+        win.level = .floating
+        win.delegate = self
+
+        let content = NSView(frame: win.contentRect(forFrameRect: win.frame))
+        content.autoresizingMask = [.width, .height]
+        win.contentView = content
+
+        let scroll = NSScrollView(frame: content.bounds)
+        scroll.autoresizingMask = [.width, .height]
+        scroll.hasVerticalScroller = true
+
+        let table = EnterTableView(frame: scroll.bounds)
+        table.headerView = nil
+        table.usesAlternatingRowBackgroundColors = true
+        table.rowHeight = 26
+        table.allowsMultipleSelection = false
+        table.focusRingType = .none
+        table.delegate = self
+        table.dataSource = self
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
+        col.width = w - 24
+        table.addTableColumn(col)
+
+        table.onEnter = { [weak self] in self?.acceptSelection() }
+        table.onEscape = { [weak self] in self?.cancelSelection() }
+
+        scroll.documentView = table
+        content.addSubview(scroll)
+
+        table.reloadData()
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+
+        self.window = win
+        self.tableView = table
+
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(table)
+
+        NSApp.runModal(for: win)
+
+        win.orderOut(nil)
+        self.window = nil
+        self.tableView = nil
+
+        return selectedIndex
+    }
+
+    private func acceptSelection() {
+        guard let tv = tableView else {
+            cancelSelection()
+            return
+        }
+        let row = tv.selectedRow
+        if row >= 0 && row < labels.count {
+            selectedIndex = row
+            NSApp.stopModal(withCode: .OK)
+        }
+    }
+
+    private func cancelSelection() {
+        selectedIndex = nil
+        NSApp.stopModal(withCode: .cancel)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        labels.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let id = NSUserInterfaceItemIdentifier("cell")
+        let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? NSTableCellView()
+        cell.identifier = id
+
+        let textField: NSTextField
+        if let tf = cell.textField {
+            textField = tf
+        } else {
+            textField = NSTextField(labelWithString: "")
+            textField.lineBreakMode = .byTruncatingTail
+            textField.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(textField)
+            cell.textField = textField
+            NSLayoutConstraint.activate([
+                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+        }
+        textField.stringValue = labels[row]
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let tv = tableView else { return }
+        let row = tv.selectedRow
+        if row >= 0 && row < labels.count {
+            selectedIndex = row
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, didDoubleClickRow row: Int) {
+        if row >= 0 && row < labels.count {
+            selectedIndex = row
+            NSApp.stopModal(withCode: .OK)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.stopModal(withCode: .cancel)
+    }
+}
+
+final class ClipHistoryApp {
+    private let store = ClipboardStore()
+    private var history: [HistoryEntry] = []
+    private var timer: Timer?
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandler: EventHandlerRef?
+
+    private var lastChangeCount: Int = NSPasteboard.general.changeCount
+    private var isInjectingPaste = false
+
+    func start() {
+        requestAccessibilityPermissionPrompt()
+
+        history = store.load()
+        captureCurrentClipboard()
+
+        startClipboardPolling()
+        registerHotkey()
+
+        print("ClipHistory native running. Press Cmd+Shift+V")
+    }
+
+    private func requestAccessibilityPermissionPrompt() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let options = [key: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func startClipboardPolling() {
+        timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
+            self?.onTick()
+        }
+    }
+
+    private func onTick() {
+        guard !isInjectingPaste else { return }
+        let pb = NSPasteboard.general
+        guard pb.changeCount != lastChangeCount else { return }
+        lastChangeCount = pb.changeCount
+
+        guard let text = pb.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        addToHistory(text)
+    }
+
+    private func captureCurrentClipboard() {
+        let pb = NSPasteboard.general
+        guard let text = pb.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        addToHistory(text)
+        lastChangeCount = pb.changeCount
+    }
+
+    private func addToHistory(_ text: String) {
+        history.removeAll { $0.text == text }
+        history.insert(HistoryEntry(text: text, ts: Date()), at: 0)
+        if history.count > maxItems { history = Array(history.prefix(maxItems)) }
+        store.save(history)
+    }
+
+    private func registerHotkey() {
+        let hotKeyID = EventHotKeyID(signature: OSType(0x434C4950), id: UInt32(1))
+        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        let keyCode: UInt32 = 9 // kVK_ANSI_V
+
+        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+
+        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+
+        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, event, userData in
+                guard let userData, let event else { return noErr }
+                let app = Unmanaged<ClipHistoryApp>.fromOpaque(userData).takeUnretainedValue()
+
+                var hotKeyID = EventHotKeyID()
+                let status = GetEventParameter(
+                    event,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+                if status == noErr && hotKeyID.id == 1 {
+                    app.showPickerAndPaste()
+                }
+                return noErr
+            },
+            1,
+            &eventSpec,
+            selfPtr,
+            &eventHandler
+        )
+    }
+
+    private func showPickerAndPaste() {
+        history = store.prune(history)
+        captureCurrentClipboard()
+        guard !history.isEmpty else { return }
+
+        let previousApp = NSWorkspace.shared.frontmostApplication
+
+        let labels = history.prefix(80).enumerated().map { idx, e in
+            var s = e.text.replacingOccurrences(of: "\n", with: "↵")
+            s = s.replacingOccurrences(of: "\t", with: "⇥")
+            if s.count > 120 {
+                s = String(s.prefix(120)) + "..."
+            }
+            s = s.replacingOccurrences(of: "\\", with: "\\\\")
+            s = s.replacingOccurrences(of: "\"", with: "\\\"")
+            return "\(idx + 1). \(s)"
+        }
+
+        let picker = ClipboardPicker(labels: labels)
+        guard let selectedIndex = picker.present(), selectedIndex < history.count else {
+            return
+        }
+
+        let text = history[selectedIndex].text
+        addToHistory(text)
+
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+
+        guard let app = previousApp else { return }
+
+        isInjectingPaste = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if #available(macOS 14.0, *) {
+                app.activate()
+            } else {
+                app.activate(options: [.activateIgnoringOtherApps])
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                self.sendCmdV()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.isInjectingPaste = false
+                }
+            }
+        }
+    }
+
+    private func sendCmdV() {
+        let source = CGEventSource(stateID: .combinedSessionState)
+
+        let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)
+        let vDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
+        let vUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
+        let cmdUp = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: false)
+
+        vDown?.flags = .maskCommand
+        vUp?.flags = .maskCommand
+
+        let tap = CGEventTapLocation.cghidEventTap
+        cmdDown?.post(tap: tap)
+        vDown?.post(tap: tap)
+        vUp?.post(tap: tap)
+        cmdUp?.post(tap: tap)
+    }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+
+let manager = ClipHistoryApp()
+manager.start()
+
+app.run()

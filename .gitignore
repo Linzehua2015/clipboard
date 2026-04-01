@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Build output
+cliphistory
+
+# Logs / runtime data
+*.log
+*.err
+.local/
+
+# Xcode / Swift temp
+.build/
+*.swp
