@@ -3,6 +3,8 @@
 
 # Build output
 cliphistory
+ClipHistory.app/
+ClipHistory.zip
 
 # Logs / runtime data
 *.log
