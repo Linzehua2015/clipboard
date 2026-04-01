@@ -69,6 +69,7 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
     private var selectedIndex: Int?
     private var window: NSWindow?
     private var tableView: EnterTableView?
+    private var modalStopped = false
 
     init(labels: [String]) {
         self.labels = labels
@@ -135,7 +136,6 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
 
         NSApp.runModal(for: win)
 
-        win.orderOut(nil)
         self.window = nil
         self.tableView = nil
 
@@ -150,13 +150,22 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         let row = tv.selectedRow
         if row >= 0 && row < labels.count {
             selectedIndex = row
-            NSApp.stopModal(withCode: .OK)
         }
+        closeWindow()
     }
 
     private func cancelSelection() {
         selectedIndex = nil
-        NSApp.stopModal(withCode: .cancel)
+        closeWindow()
+    }
+    
+    private func closeWindow() {
+        guard !modalStopped else { return }
+        modalStopped = true
+        NSApp.stopModal(withCode: .OK)
+        if let w = window {
+            w.close()
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -198,11 +207,13 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
     func tableView(_ tableView: NSTableView, didDoubleClickRow row: Int) {
         if row >= 0 && row < labels.count {
             selectedIndex = row
-            NSApp.stopModal(withCode: .OK)
+            closeWindow()
         }
     }
 
     func windowWillClose(_ notification: Notification) {
+        guard !modalStopped else { return }
+        modalStopped = true
         NSApp.stopModal(withCode: .cancel)
     }
 }
@@ -213,6 +224,7 @@ final class ClipHistoryApp {
     private var timer: Timer?
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
+    private var statusItem: NSStatusItem?
 
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
     private var isInjectingPaste = false
@@ -225,6 +237,7 @@ final class ClipHistoryApp {
 
         startClipboardPolling()
         registerHotkey()
+        setupMenuBar()
 
         print("ClipHistory native running. Press Cmd+Shift+V")
     }
@@ -267,6 +280,27 @@ final class ClipHistoryApp {
         history.insert(HistoryEntry(text: text, ts: Date()), at: 0)
         if history.count > maxItems { history = Array(history.prefix(maxItems)) }
         store.save(history)
+    }
+
+    private func setupMenuBar() {
+        guard statusItem == nil else { return }  // Prevent duplicate items
+        
+        let statusBar = NSStatusBar.system
+        let item = statusBar.statusItem(withLength: 30.0)
+        
+        item.button?.title = "📋"
+        item.button?.font = NSFont.systemFont(ofSize: 14)
+        
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Quit ClipHistory", action: #selector(quit), keyEquivalent: "q"))
+        menu.items.last?.target = self
+        item.menu = menu
+        
+        self.statusItem = item
+    }
+    
+    @objc private func quit() {
+        NSApplication.shared.terminate(nil)
     }
 
     private func registerHotkey() {
@@ -373,6 +407,21 @@ final class ClipHistoryApp {
         cmdUp?.post(tap: tap)
     }
 }
+
+// Single-instance guard via lock file
+let lockFile = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".local/share/cliphistory/.lock")
+let lockPath = lockFile.path
+
+if FileManager.default.fileExists(atPath: lockPath),
+   let pidStr = try? String(contentsOfFile: lockPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+   let existingPid = Int32(pidStr),
+   existingPid != getpid(),
+   kill(existingPid, 0) == 0 {
+    print("ClipHistory is already running (PID \(existingPid)). Exiting.")
+    exit(0)
+}
+try? String(getpid()).write(toFile: lockPath, atomically: true, encoding: .utf8)
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
