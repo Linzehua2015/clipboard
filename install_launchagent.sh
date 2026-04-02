@@ -30,7 +30,7 @@ cat > "$PLIST" <<EOF
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <false/>
   <key>StandardOutPath</key>
   <string>$LOG_DIR/native.log</string>
   <key>StandardErrorPath</key>
