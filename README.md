@@ -4,14 +4,20 @@ Lightweight native clipboard history for macOS.
 
 ClipHistory runs in the macOS menu bar, records text clipboard history locally, and lets you open a history window with `Cmd+Shift+V`. After selecting an item, press `Enter` or double-click to copy it back to the clipboard and paste it into the current app.
 
+## Screenshot
+
+![ClipHistory Screenshot](readmeAssets/img1.png)
+
 ## Features
 
 - Native macOS app written in Swift
 - Global shortcut: `Cmd+Shift+V`
 - Text-only clipboard history
+- Fuzzy search with focused input box
 - Up to 1000 history items
 - Automatically removes entries older than 7 days
 - Menu bar icon with manual quit action
+- Clear all history from menu bar
 - Single-instance protection
 - Can be packaged as a standalone `.app`
 - No server, no port, no cloud sync
@@ -46,8 +52,20 @@ After launch:
 
 - a clipboard icon appears in the macOS menu bar
 - press `Cmd+Shift+V` to open clipboard history
+- type in the search box to filter history
+- when search box is focused, press `↓` to jump into the list
 - use arrow keys to move selection
 - press `Enter` or double-click to use the selected item
+
+## Search
+
+ClipHistory includes built-in fuzzy search in the popup window.
+
+- The search input is focused by default when the popup opens
+- Typing filters the list in real time
+- Supports both direct substring match and ordered fuzzy match
+- Press `↓` in the search field to move focus to the result list
+- Press `Enter` to paste the currently selected result
 
 ## Permissions
 
@@ -132,6 +150,7 @@ When the app is running, a clipboard icon appears in the top-right macOS menu ba
 
 Available action:
 
+- `Clear All History`
 - `Quit ClipHistory`
 
 ## Project Structure
