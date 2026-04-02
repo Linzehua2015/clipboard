@@ -145,8 +145,8 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         search.delegate = self
         search.onEnter = { [weak self] in self?.acceptSelection() }
         search.onEscape = { [weak self] in self?.cancelSelection() }
-        search.onDown = { [weak self] in self?.moveSelection(delta: 1) }
-        search.onUp = { [weak self] in self?.moveSelection(delta: -1) }
+        search.onDown = { [weak self] in self?.moveSelectionFromSearch(delta: 1) }
+        search.onUp = { [weak self] in self?.moveSelectionFromSearch(delta: -1) }
         content.addSubview(search)
 
         let scroll = NSScrollView(frame: NSRect(
@@ -180,7 +180,7 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         content.addSubview(scroll)
 
         table.reloadData()
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        table.deselectAll(nil)
 
         self.window = win
         self.tableView = table
@@ -217,6 +217,15 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         let next = max(0, min(filteredIndices.count - 1, cur + delta))
         tv.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         tv.scrollRowToVisible(next)
+    }
+
+    private func moveSelectionFromSearch(delta: Int) {
+        guard let tv = tableView, let w = window, !filteredIndices.isEmpty else { return }
+
+        let target = (delta >= 0) ? 0 : (filteredIndices.count - 1)
+        tv.selectRowIndexes(IndexSet(integer: target), byExtendingSelection: false)
+        tv.scrollRowToVisible(target)
+        w.makeFirstResponder(tv)
     }
 
     private func displayText(for index: Int) -> String {
@@ -258,6 +267,32 @@ private final class ClipboardPicker: NSObject, NSTableViewDataSource, NSTableVie
         if !filteredIndices.isEmpty {
             tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === searchField else { return false }
+
+        if commandSelector == #selector(NSResponder.moveDown(_:)) {
+            moveSelectionFromSearch(delta: 1)
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.moveUp(_:)) {
+            moveSelectionFromSearch(delta: -1)
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            acceptSelection()
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelSelection()
+            return true
+        }
+
+        return false
     }
 
     private func cancelSelection() {
